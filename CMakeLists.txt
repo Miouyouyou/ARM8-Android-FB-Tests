@@ -21,3 +21,8 @@ target_link_libraries(fbdirect
 	android
 	log
 )
+
+target_compile_options(fbdirect PRIVATE
+	"$<$<CONFIG:RELEASE>:-O3>"
+	"$<$<CONFIG:DEBUG>:-O3>"
+)

@@ -21,13 +21,17 @@
 
 #include <stdio.h>
 #include <stdint.h>
+#include <inttypes.h> // stdint formats
 #include <stdlib.h> // rand
+#include <time.h>   // clock_gettime
+#include <wchar.h> // wmemset
 
 #define  LOG_TAG    "libplasma"
 #define  LOG(level, format, ...) \
-	__android_log_print(level,"[%s:%d]\n" format, __func__, __LINE__, ##__VA_ARGS__)
+	__android_log_print(level, LOG_TAG, "[%s:%d]\n" format, __func__, __LINE__, ##__VA_ARGS__)
 
 typedef uint16_t color_16bits_t;
+typedef int color_16bitsx2_t;
 typedef uint8_t  color_8bits_channel_t;
 
 #define make565(r,g,b) \
@@ -37,20 +41,11 @@ typedef uint8_t  color_8bits_channel_t;
 	  (b >> 3) \
 	)
 
-
 typedef uint16_t window_pixel_t;
-
-static inline window_pixel_t * buffer_first_pixel_of_next_line
-(ANativeWindow_Buffer const * __restrict const buffer,
- window_pixel_t       const * __restrict const line_start)
-{
-	return (window_pixel_t *) (line_start + buffer->stride);
-}
 
 #define PIXEL_COLORS_MAX 4
 #define PIXEL_COLORS_MAX_MASK 0b11
-static inline uint_fast32_t pixel_colors_next
-(uint_fast32_t current_index)
+static inline uint_fast32_t pixel_colors_random_index()
 {
 	return (rand() & PIXEL_COLORS_MAX_MASK);
 }
@@ -65,30 +60,26 @@ static void fill_pixels(ANativeWindow_Buffer* buffer)
 	};
 
 	/* Current pixel colors index */
-	uint_fast32_t p_c = rand() & PIXEL_COLORS_MAX_MASK;
-	color_16bits_t current_pixel_color;
+	window_pixel_t * __restrict current_line_start = buffer->bits;
 
-	window_pixel_t * __restrict current_pixel = buffer->bits;
-
+	size_t const window_line_width_weight =
+		buffer->width * sizeof(window_pixel_t);
+	uint_fast32_t const window_line_stride = buffer->stride;
 	uint_fast32_t n_lines = buffer->height;
+
 	while(n_lines--) {
 
-		window_pixel_t const * __restrict const current_line_start =
-			current_pixel;
+		color_16bits_t const current_pixel_color =
+			pixel_colors[pixel_colors_random_index()];
+		color_16bitsx2_t const packed_colors =
+			current_pixel_color << 16 | current_pixel_color;
 
-		window_pixel_t const * __restrict const last_pixel_of_the_line =
-			current_line_start + buffer->width;
+		wmemset(
+			(wchar_t *) current_line_start,
+			packed_colors,
+			window_line_width_weight);
 
-		current_pixel_color = pixel_colors[p_c];
-
-		while (current_pixel <= last_pixel_of_the_line) {
-			*current_pixel = current_pixel_color;
-			current_pixel++;
-		}
-
-		p_c = pixel_colors_next(p_c);
-		current_pixel =
-			buffer_first_pixel_of_next_line(buffer, current_line_start);
+		current_line_start += window_line_stride;
 	}
 }
 
@@ -98,6 +89,11 @@ struct engine {
 	int animating;
 
 	int32_t initial_window_format;
+
+	struct {
+		uint_fast32_t i;
+		uint_fast32_t data[8];
+	} times;
 };
 
 #ifndef __cplusplus
@@ -111,7 +107,38 @@ static inline bool engine_have_a_window
 	return engine->app->window != NULL;
 }
 
-static void engine_draw_frame(struct engine* engine) {
+static void engine_times_store
+(struct engine * __restrict const engine,
+ uint_fast32_t              const time_spent)
+{
+	engine->times.data[engine->times.i++] = time_spent;
+	engine->times.i &= 7;
+}
+
+static inline bool engine_times_wrapped_around
+(struct engine const * __restrict const engine)
+{
+	return engine->times.i == 0;
+}
+
+static uint_fast32_t engine_times_average
+(struct engine const * __restrict const engine)
+{
+	uint_fast32_t const * __restrict const times =
+		engine->times.data;
+
+	uint_fast64_t const times_sum =
+		times[0] + times[1] + times[2] + times[3] +
+		times[4] + times[5] + times[6] + times[7];
+
+	uint_fast32_t const times_average =
+		times_sum / 8;
+
+	return times_average;
+}
+
+static void engine_draw_frame(struct engine* engine)
+{
 
 	ANativeWindow_Buffer buffer;
 
@@ -121,15 +148,33 @@ static void engine_draw_frame(struct engine* engine) {
 		goto draw_frame_end;
 	}
 
-	
 	if (ANativeWindow_lock(engine->app->window, &buffer, NULL) < 0)
 	{
 		LOG(ANDROID_LOG_WARN, "Could not lock the window... :C\n");
 		goto draw_frame_end;
 	}
 
+	struct timespec time;
+	clock_gettime(CLOCK_MONOTONIC, &time);
+	uint_fast32_t const before_ns = time.tv_nsec;
+
 	fill_pixels(&buffer);
 	ANativeWindow_unlockAndPost(engine->app->window);
+
+	clock_gettime(CLOCK_MONOTONIC, &time);
+	uint_fast32_t const after_ns = time.tv_nsec;
+
+	uint_fast32_t time_spent;
+
+	if (after_ns > before_ns)
+		time_spent = after_ns - before_ns;
+	else
+		time_spent = (1000000000L - before_ns) + after_ns;
+
+	engine_times_store(engine, time_spent);
+	if (engine_times_wrapped_around(engine))
+		LOG(ANDROID_LOG_INFO, "Average : %" PRIuFAST32 "\n",
+			engine_times_average(engine));
 
 draw_frame_end:
 	return;
@@ -149,10 +194,13 @@ static int32_t engine_handle_input
 	int32_t const current_event_type =
 		AInputEvent_getType(event);
 
-	if (current_event_type == AINPUT_EVENT_TYPE_MOTION) {
+	if (current_event_type == AINPUT_EVENT_TYPE_MOTION)
+	{
 		engine->animating = 1;
 		return 1;
-	} else if (current_event_type == AINPUT_EVENT_TYPE_KEY) {
+	}
+	else if (current_event_type == AINPUT_EVENT_TYPE_KEY)
+	{
 		LOG(ANDROID_LOG_INFO,
 			"Key event: action=%d keyCode=%d metaState=0x%x",
 			AKeyEvent_getAction(event),
