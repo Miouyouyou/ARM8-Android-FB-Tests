@@ -26,12 +26,12 @@
 #include <time.h>   // clock_gettime
 #include <wchar.h> // wmemset
 
-#define  LOG_TAG    "libplasma"
+#define  LOG_TAG    "libfbdirect"
 #define  LOG(level, format, ...) \
 	__android_log_print(level, LOG_TAG, "[%s:%d]\n" format, __func__, __LINE__, ##__VA_ARGS__)
 
 typedef uint16_t color_16bits_t;
-typedef int color_16bitsx2_t;
+typedef int      color_16bitsx2_t;
 typedef uint8_t  color_8bits_channel_t;
 
 #define make565(r,g,b) \
@@ -50,7 +50,8 @@ static inline uint_fast32_t pixel_colors_random_index()
 	return (rand() & PIXEL_COLORS_MAX_MASK);
 }
 
-static void fill_pixels(ANativeWindow_Buffer* buffer)
+void __attribute__((weak)) fill_pixels
+(ANativeWindow_Buffer* buffer)
 {
 	static color_16bits_t const pixel_colors[PIXEL_COLORS_MAX] = {
 		make565(255,  0,  0),
@@ -154,6 +155,13 @@ static void engine_draw_frame(struct engine* engine)
 		goto draw_frame_end;
 	}
 
+	LOG(ANDROID_LOG_INFO,
+		"Buffer size : %dx%d Stride : %d\naddress : %p\n",
+		buffer.width,
+		buffer.height,
+		buffer.stride,
+		buffer.bits);
+
 	struct timespec time;
 	clock_gettime(CLOCK_MONOTONIC, &time);
 	uint_fast32_t const before_ns = time.tv_nsec;
@@ -222,12 +230,15 @@ static void engine_handle_cmd
 			if (engine_have_a_window(engine))
 			{
 
-				engine->initial_window_format =
-					ANativeWindow_getFormat(app->window);
+				ANativeWindow * __restrict const window =
+					app->window;
 
-				ANativeWindow_setBuffersGeometry(app->window,
-					ANativeWindow_getWidth(app->window),
-					ANativeWindow_getHeight(app->window),
+				engine->initial_window_format =
+					ANativeWindow_getFormat(window);
+
+				ANativeWindow_setBuffersGeometry(window,
+					ANativeWindow_getWidth(window),
+					ANativeWindow_getHeight(window),
 					WINDOW_FORMAT_RGB_565);
 
 				engine_draw_frame(engine);
@@ -236,9 +247,10 @@ static void engine_handle_cmd
 		case APP_CMD_TERM_WINDOW:
 			engine_term_display(engine);
 
-			ANativeWindow_setBuffersGeometry(app->window,
-				ANativeWindow_getWidth(app->window),
-				ANativeWindow_getHeight(app->window),
+			ANativeWindow * __restrict const window = app->window;
+			ANativeWindow_setBuffersGeometry(window,
+				ANativeWindow_getWidth(window),
+				ANativeWindow_getHeight(window),
 				engine->initial_window_format);
 
 			break;
